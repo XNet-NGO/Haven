@@ -76,7 +76,9 @@ android {
 
     buildTypes {
         release {
-            signingConfig = signingConfigs.getByName("release")
+            if (rootProject.file("haven-release.jks").exists()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isMinifyEnabled = true
             isShrinkResources = true
             // The release workflow passes -PnoLintVital: lintVitalAnalyze ran
