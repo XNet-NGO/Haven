@@ -82,28 +82,49 @@ class LocalSession(
     }
 
     /**
-     * Fork the child process and start reading PTY output.
-     * @throws IllegalStateException if forkpty fails
+     * Fork the child process (or spawn via xnix-shelld at uid 2000) and start reading PTY output.
+     * @throws IllegalStateException if forkpty/openpty fails
      */
     fun start(rows: Int = 24, cols: Int = 80) {
         if (closed) return
 
-        val result = try {
-            forkExecutor.submit<IntArray> {
-                PtyBridge.nativeForkPty(command, args, env, rows, cols, rawTermios)
-            }.get()
-        } catch (e: java.util.concurrent.ExecutionException) {
-            throw (e.cause ?: e)
+        var fd = -1
+        var pid = -1
+
+        if (ShelldClient.isAvailable()) {
+            val shelldCmd = buildShelldCommandLine(command, args, env)
+            Log.d(TAG, "Starting session via xnix-shelld: $shelldCmd")
+            val sFd = ShelldClient.openPty(shelldCmd)
+            if (sFd >= 0) {
+                fd = sFd
+                pid = -2000
+                PtyBridge.nativeSetSize(fd, rows, cols)
+            } else {
+                Log.w(TAG, "ShelldClient.openPty failed (errno ${-sFd}), falling back to nativeForkPty")
+            }
         }
-        // On failure the native contract returns [-1, errno]; commit childPid
-        // only after the success check so a later close() can't feed errno to
-        // android.os.Process.killProcess(). (#208 finding 8)
-        val fd = result[0]
+
         if (fd < 0) {
-            throw IllegalStateException("forkpty failed: errno=${result[1]}")
+            val result = try {
+                forkExecutor.submit<IntArray> {
+                    PtyBridge.nativeForkPty(command, args, env, rows, cols, rawTermios)
+                }.get()
+            } catch (e: java.util.concurrent.ExecutionException) {
+                throw (e.cause ?: e)
+            }
+            // On failure the native contract returns [-1, errno]; commit childPid
+            // only after the success check so a later close() can't feed errno to
+            // android.os.Process.killProcess(). (#208 finding 8)
+            val forkFd = result[0]
+            if (forkFd < 0) {
+                throw IllegalStateException("forkpty failed: errno=${result[1]}")
+            }
+            fd = forkFd
+            pid = result[1]
         }
+
         masterFd = fd
-        childPid = result[1]
+        childPid = pid
 
         Log.d(TAG, "Started local process: pid=$childPid fd=$masterFd cmd=$command")
 
@@ -138,10 +159,14 @@ class LocalSession(
             }
             // Process exited — wait for exit code
             if (!closed) {
-                val exitCode = try {
-                    PtyBridge.nativeWaitPid(childPid)
-                } catch (_: Exception) {
-                    -1
+                val exitCode = if (childPid > 0) {
+                    try {
+                        PtyBridge.nativeWaitPid(childPid)
+                    } catch (_: Exception) {
+                        -1
+                    }
+                } else {
+                    0
                 }
                 Log.d(TAG, "Process $childPid exited: $exitCode")
                 onExited?.invoke(exitCode)
@@ -152,12 +177,28 @@ class LocalSession(
         }
     }
 
+    private fun buildShelldCommandLine(command: String, args: Array<String>, env: Array<String>): String {
+        val sb = StringBuilder()
+        for (e in env) {
+            val eq = e.indexOf('=')
+            if (eq > 0) {
+                val k = e.substring(0, eq)
+                val v = e.substring(eq + 1)
+                sb.append("export ").append(k).append("='").append(v.replace("'", "'\\''")).append("'; ")
+            }
+        }
+        sb.append("exec ")
+        val fullCmd = if (args.isNotEmpty()) args else arrayOf(command)
+        sb.append(fullCmd.joinToString(" ") { "'${it.replace("'", "'\\''")}'" })
+        return sb.toString()
+    }
+
     /**
      * True while the child process and its reader thread are live. Goes false
      * once the PTY hits EOF (process exited) or [close] runs — used so callers
      * can fail a write loudly instead of silently dropping it into a dead fd.
      */
-    fun isAlive(): Boolean = !closed && childPid > 0 && readerThread?.isAlive == true
+    fun isAlive(): Boolean = !closed && (childPid > 0 || childPid == -2000) && readerThread?.isAlive == true
 
     /**
      * Send keyboard input to the PTY.

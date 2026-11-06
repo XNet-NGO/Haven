@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.22.1)
 project(pty_bridge)
 
-add_library(pty_bridge SHARED pty_bridge.c)
+add_library(pty_bridge SHARED pty_bridge.c shelld_client.c)
 target_link_libraries(pty_bridge log)
 
 # Launcher for the UML guest transport: execs passt and the UML kernel

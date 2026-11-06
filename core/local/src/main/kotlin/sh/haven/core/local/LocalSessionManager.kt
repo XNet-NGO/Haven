@@ -376,7 +376,7 @@ class LocalSessionManager @Inject constructor(
                 "-b", prootManager.selinuxMaskBind(rootfsDir),
                 *storageBinds,
                 *customBinds,
-                "-b", "${context.cacheDir.absolutePath}:/tmp",
+                "-b", "${if (ShelldClient.isAvailable()) "/data/local/tmp" else context.cacheDir.absolutePath}:/tmp",
                 // #304: surface the device model at the devicetree path fastfetch reads.
                 *(prootManager.deviceModelDevicetreeBind()?.let { arrayOf("-b", it) } ?: emptyArray()),
                 // #304 part 2: optionally expose Android's system partitions (opt-in).
@@ -411,8 +411,11 @@ class LocalSessionManager @Inject constructor(
                 // #780: disable Chromium/Electron user-namespace/SUID sandbox inside PRoot
                 // so Electron apps (VS Code, VSCodium, Obsidian, etc.) start cleanly.
                 "ELECTRON_DISABLE_SANDBOX=1",
-                "PROOT_TMP_DIR=${context.cacheDir.absolutePath}",
-                "PROOT_LOADER=${java.io.File(context.applicationInfo.nativeLibraryDir, "libproot_loader.so").absolutePath}",
+                "PROOT_TMP_DIR=${if (ShelldClient.isAvailable()) "/data/local/tmp" else context.cacheDir.absolutePath}",
+                "PROOT_LOADER=${run {
+                    val loaderFile = java.io.File(context.applicationInfo.nativeLibraryDir, "libproot_loader.so")
+                    if (loaderFile.exists()) loaderFile.absolutePath else "/product/app/Haven/lib/arm64/libproot_loader.so"
+                }}",
                 "PROOT_L2S_DIR=${prootManager.l2sEnvValue(targetDistro)}",
             )
             Triple(cmd, args, env)

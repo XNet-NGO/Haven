@@ -354,7 +354,8 @@ class ProotManager @Inject constructor(
     }
 
     private val _activeDistroId = MutableStateFlow(
-        prefs.getString(PREF_ACTIVE_DISTRO_ID, null) ?: DistroCatalog.DEFAULT_ID,
+        prefs.getString(PREF_ACTIVE_DISTRO_ID, null)
+            ?: (if (ShelldClient.isAvailable() && File("/data/local/tmp/ubuntu/.haven-rootfs-ready").exists()) DistroCatalog.UBUNTU_NOBLE.id else DistroCatalog.DEFAULT_ID),
     )
 
     /**
@@ -718,7 +719,13 @@ class ProotManager @Inject constructor(
      * (re)install and [reconcileActiveDistro] won't fall back to it.
      */
     val installedDistros: List<Distro>
-        get() = DistroCatalog.all.filter { isRootfsComplete(rootfsDirFor(it.id)) }
+        get() {
+            val list = DistroCatalog.all.filter { isRootfsComplete(rootfsDirFor(it.id)) }
+            if (list.isEmpty() && ShelldClient.isAvailable() && File("/data/local/tmp/ubuntu/.haven-rootfs-ready").exists()) {
+                return listOf(DistroCatalog.UBUNTU_NOBLE)
+            }
+            return list
+        }
 
     /**
      * Catalog entries the user could install: arch-compatible, not
@@ -765,6 +772,18 @@ class ProotManager @Inject constructor(
      * even when the migration is blocked.
      */
     fun rootfsDirFor(distroId: String): File {
+        if (ShelldClient.isAvailable()) {
+            val candidates = listOf(
+                File("/data/local/tmp/$distroId"),
+                if (distroId.startsWith("ubuntu")) File("/data/local/tmp/ubuntu") else null,
+                File("/data/local/tmp/ubuntu"),
+            ).filterNotNull()
+            for (dir in candidates) {
+                if (dir.exists() && isRootfsComplete(dir)) {
+                    return dir
+                }
+            }
+        }
         val expected = File(context.filesDir, "proot/rootfs/$distroId")
         if (distroId == DistroCatalog.DEFAULT_ID && !expected.exists()) {
             val legacy = File(context.filesDir, "proot/rootfs/alpine")
@@ -892,6 +911,18 @@ class ProotManager @Inject constructor(
 
     val prootBinary: String?
         get() {
+            if (ShelldClient.isAvailable()) {
+                val candidates = listOf(
+                    "/data/local/tmp/proot",
+                    "/product/bin/proot",
+                    File(context.applicationInfo.nativeLibraryDir, "libproot.so").absolutePath,
+                    "/product/app/Haven/lib/arm64/libproot.so",
+                )
+                for (path in candidates) {
+                    val f = File(path)
+                    if (f.exists()) return f.absolutePath
+                }
+            }
             val nativeDir = context.applicationInfo.nativeLibraryDir
             val proot = File(nativeDir, "libproot.so")
             return if (proot.canExecute()) proot.absolutePath else null
@@ -2401,12 +2432,12 @@ class ProotManager @Inject constructor(
      * Returns the absolute host path to bind at `/dev/shm`.
      */
     fun ensureDevShm(): String {
-        val d = File(context.cacheDir, "devshm")
-        if (!d.exists()) d.mkdirs()
-        d.setReadable(true, false)
-        d.setWritable(true, false)
-        d.setExecutable(true, false)
-        return d.absolutePath
+        val baseDir = if (ShelldClient.isAvailable()) File("/data/local/tmp/devshm") else File(context.cacheDir, "devshm")
+        if (!baseDir.exists()) baseDir.mkdirs()
+        baseDir.setReadable(true, false)
+        baseDir.setWritable(true, false)
+        baseDir.setExecutable(true, false)
+        return baseDir.absolutePath
     }
 
     /**
@@ -2497,7 +2528,7 @@ class ProotManager @Inject constructor(
             "--bind=/sys",
             *fakeProcBindArgs(activeRootfsDir, longForm = true),
             "--bind=$sysSelinuxMask",
-            "--bind=${context.cacheDir.absolutePath}:/tmp",
+            "--bind=${if (ShelldClient.isAvailable()) "/data/local/tmp" else context.cacheDir.absolutePath}:/tmp",
             // #304: surface the device model at the devicetree path fastfetch reads.
             *(deviceModelDevicetreeBind()?.let { arrayOf("--bind=$it") } ?: emptyArray()),
             // #304 part 2: optionally expose Android's system partitions (opt-in).
@@ -2524,7 +2555,7 @@ class ProotManager @Inject constructor(
             // the proot binary itself finds its loader. The tracee's
             // env is reset by `env -i` inside proot.
             environment().apply {
-                put("PROOT_TMP_DIR", context.cacheDir.absolutePath)
+                put("PROOT_TMP_DIR", if (ShelldClient.isAvailable()) "/data/local/tmp" else context.cacheDir.absolutePath)
                 put("PROOT_LOADER", loaderPath)
                 put("PROOT_L2S_DIR", l2sEnvValue(activeDistroId))
             }
